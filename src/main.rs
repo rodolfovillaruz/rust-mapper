@@ -287,18 +287,12 @@ fn print_map(path: &Path, map: FileMap) {
         println!("  ⚡ Free Functions:");
         for f in map.functions {
             println!("     - {}", f.name);
-            if !f.dependencies.is_empty() {
-                println!("       └─ Dependencies: {}", f.dependencies.join(", "));
-            }
         }
     }
     if !map.methods.is_empty() {
         println!("  🔧 Impl Methods:");
         for m in map.methods {
             println!("     - {}", m.name);
-            if !m.dependencies.is_empty() {
-                println!("       └─ Dependencies: {}", m.dependencies.join(", "));
-            }
         }
     }
 }
