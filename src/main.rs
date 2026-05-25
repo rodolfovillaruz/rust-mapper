@@ -1,3 +1,4 @@
+use quote::ToTokens; // <-- Added to format AST nodes back into strings
 use std::fs;
 use std::path::Path;
 use syn::visit::Visit;
@@ -129,6 +130,21 @@ fn format_use_tree(tree: &syn::UseTree) -> String {
     }
 }
 
+/// Formats function arguments into a readable string
+fn format_args(inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>) -> String {
+    inputs
+        .iter()
+        .map(|arg| {
+            // Convert AST nodes back to token strings, and clean up common excessive spaces
+            arg.to_token_stream()
+                .to_string()
+                .replace(" : ", ": ")
+                .replace("& mut ", "&mut ")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // Implement the Syn Visitor trait to extract specific items
 impl<'ast> Visit<'ast> for MapVisitor {
     fn visit_item_use(&mut self, i: &'ast ItemUse) {
@@ -158,8 +174,10 @@ impl<'ast> Visit<'ast> for MapVisitor {
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let name = i.sig.ident.to_string();
+        let args = format_args(&i.sig.inputs); // Extract parameters
+
         self.current_functions.push(FuncMap {
-            name,
+            name: format!("{}({})", name, args),
             dependencies: Vec::new(),
         });
 
@@ -182,14 +200,16 @@ impl<'ast> Visit<'ast> for MapVisitor {
     }
 
     fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
-        let name = if let Some(impl_name) = &self.current_impl_target {
+        let base_name = if let Some(impl_name) = &self.current_impl_target {
             format!("{}::{}", impl_name, i.sig.ident)
         } else {
             i.sig.ident.to_string()
         };
 
+        let args = format_args(&i.sig.inputs); // Extract parameters
+
         self.current_functions.push(FuncMap {
-            name,
+            name: format!("{}({})", base_name, args),
             dependencies: Vec::new(),
         });
 
@@ -286,13 +306,13 @@ fn print_map(path: &Path, map: FileMap) {
     if !map.functions.is_empty() {
         println!("  ⚡ Free Functions:");
         for f in map.functions {
-            println!("     - {}", f.name);
+            println!("     - {}", f.name); // E.g., my_func(a: i32, b: String)
         }
     }
     if !map.methods.is_empty() {
         println!("  🔧 Impl Methods:");
         for m in map.methods {
-            println!("     - {}", m.name);
+            println!("     - {}", m.name); // E.g., MyStruct::my_method(&self, data: Vec<u8>)
         }
     }
 }
