@@ -1,4 +1,4 @@
-use quote::ToTokens; // <-- Added to format AST nodes back into strings
+use quote::ToTokens;
 use std::fs;
 use std::path::Path;
 use syn::visit::Visit;
@@ -12,11 +12,31 @@ struct FuncMap {
     dependencies: Vec<String>,
 }
 
+#[derive(Debug)]
+enum StructField {
+    Named {
+        name: String,
+        vis: String,
+        ty: String,
+    },
+    Unnamed {
+        vis: String,
+        ty: String,
+    },
+}
+
+/// Holds details of a single struct, including its fields
+#[derive(Debug)]
+struct StructDetails {
+    name: String,
+    fields: Vec<StructField>,
+}
+
 /// Holds the mapped data for a single file
 #[derive(Default, Debug)]
 struct FileMap {
     imports: Vec<String>,
-    structs: Vec<String>,
+    structs: Vec<StructDetails>,
     enums: Vec<String>,
     traits: Vec<String>,
     functions: Vec<FuncMap>,
@@ -98,7 +118,7 @@ impl MapVisitor {
     }
 }
 
-// Implement the Syn Visitor trait to extract specific items
+// Helper: format visibility
 fn format_vis(vis: &syn::Visibility) -> String {
     match vis {
         syn::Visibility::Public(_) => "pub ".to_string(),
@@ -117,6 +137,7 @@ fn format_vis(vis: &syn::Visibility) -> String {
     }
 }
 
+// Helper: format a use tree
 fn format_use_tree(tree: &syn::UseTree) -> String {
     match tree {
         syn::UseTree::Path(p) => format!("{}::{}", p.ident, format_use_tree(&p.tree)),
@@ -135,7 +156,6 @@ fn format_args(inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comm
     inputs
         .iter()
         .map(|arg| {
-            // Convert AST nodes back to token strings, and clean up common excessive spaces
             arg.to_token_stream()
                 .to_string()
                 .replace(" : ", ": ")
@@ -158,7 +178,39 @@ impl<'ast> Visit<'ast> for MapVisitor {
     }
 
     fn visit_item_struct(&mut self, i: &'ast ItemStruct) {
-        self.map.structs.push(i.ident.to_string());
+        let name = i.ident.to_string();
+        let fields = match &i.fields {
+            syn::Fields::Named(named) => named
+                .named
+                .iter()
+                .map(|f| {
+                    let vis = format_vis(&f.vis);
+                    let name = f.ident.as_ref().unwrap().to_string();
+                    let ty =
+                        f.ty.to_token_stream()
+                            .to_string()
+                            .replace(" : ", ": ")
+                            .replace("& mut ", "&mut ");
+                    StructField::Named { name, vis, ty }
+                })
+                .collect(),
+            syn::Fields::Unnamed(unnamed) => unnamed
+                .unnamed
+                .iter()
+                .map(|f| {
+                    let vis = format_vis(&f.vis);
+                    let ty =
+                        f.ty.to_token_stream()
+                            .to_string()
+                            .replace(" : ", ": ")
+                            .replace("& mut ", "&mut ");
+                    StructField::Unnamed { vis, ty }
+                })
+                .collect(),
+            syn::Fields::Unit => Vec::new(),
+        };
+
+        self.map.structs.push(StructDetails { name, fields });
         syn::visit::visit_item_struct(self, i);
     }
 
@@ -174,14 +226,13 @@ impl<'ast> Visit<'ast> for MapVisitor {
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let name = i.sig.ident.to_string();
-        let args = format_args(&i.sig.inputs); // Extract parameters
+        let args = format_args(&i.sig.inputs);
 
         self.current_functions.push(FuncMap {
             name: format!("{}({})", name, args),
             dependencies: Vec::new(),
         });
 
-        // Visit children (arguments, return types, body) to extract dependencies
         syn::visit::visit_item_fn(self, i);
 
         if let Some(func) = self.current_functions.pop() {
@@ -206,14 +257,13 @@ impl<'ast> Visit<'ast> for MapVisitor {
             i.sig.ident.to_string()
         };
 
-        let args = format_args(&i.sig.inputs); // Extract parameters
+        let args = format_args(&i.sig.inputs);
 
         self.current_functions.push(FuncMap {
             name: format!("{}({})", base_name, args),
             dependencies: Vec::new(),
         });
 
-        // Visit children (arguments, return types, body) to extract dependencies
         syn::visit::visit_impl_item_fn(self, i);
 
         if let Some(func) = self.current_functions.pop() {
@@ -223,7 +273,6 @@ impl<'ast> Visit<'ast> for MapVisitor {
 
     // --- Dependency Extraction Hooks ---
 
-    /// Extracts direct function calls: `my_function()`
     fn visit_expr_call(&mut self, i: &'ast syn::ExprCall) {
         if let syn::Expr::Path(expr_path) = &*i.func {
             self.add_dependency(&expr_path.path);
@@ -231,25 +280,21 @@ impl<'ast> Visit<'ast> for MapVisitor {
         syn::visit::visit_expr_call(self, i);
     }
 
-    /// Extracts method calls: `my_object.my_method()`
     fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
         self.add_dependency_string(i.method.to_string());
         syn::visit::visit_expr_method_call(self, i);
     }
 
-    /// Extracts struct instantiations: `MyStruct { field: 1 }`
     fn visit_expr_struct(&mut self, i: &'ast syn::ExprStruct) {
         self.add_dependency(&i.path);
         syn::visit::visit_expr_struct(self, i);
     }
 
-    /// Extracts explicit types: Variable assignments, Function signatures, Generics
     fn visit_type_path(&mut self, i: &'ast syn::TypePath) {
         self.add_dependency(&i.path);
         syn::visit::visit_type_path(self, i);
     }
 
-    /// Extracts macro invocations: `my_macro!()`
     fn visit_macro(&mut self, i: &'ast syn::Macro) {
         self.add_dependency(&i.path);
         syn::visit::visit_macro(self, i);
@@ -288,7 +333,27 @@ fn print_map(path: &Path, map: FileMap) {
     if !map.structs.is_empty() {
         println!("  📦 Structs:");
         for s in map.structs {
-            println!("     - {}", s);
+            let fields_desc = if s.fields.is_empty() {
+                String::new()
+            } else {
+                // Determine bracket style based on the first field (Named → { }, Unnamed → ( ))
+                let use_braces = matches!(s.fields[0], StructField::Named { .. });
+                let parts: Vec<String> = s
+                    .fields
+                    .iter()
+                    .map(|f| match f {
+                        StructField::Named { name, vis, ty } => format!("{}{}: {}", vis, name, ty),
+                        StructField::Unnamed { vis, ty } => format!("{}{}", vis, ty),
+                    })
+                    .collect();
+                let body = parts.join(", ");
+                if use_braces {
+                    format!("{{ {} }}", body)
+                } else {
+                    format!("({})", body)
+                }
+            };
+            println!("     - {} {}", s.name, fields_desc);
         }
     }
     if !map.enums.is_empty() {
@@ -306,13 +371,13 @@ fn print_map(path: &Path, map: FileMap) {
     if !map.functions.is_empty() {
         println!("  ⚡ Free Functions:");
         for f in map.functions {
-            println!("     - {}", f.name); // E.g., my_func(a: i32, b: String)
+            println!("     - {}", f.name);
         }
     }
     if !map.methods.is_empty() {
         println!("  🔧 Impl Methods:");
         for m in map.methods {
-            println!("     - {}", m.name); // E.g., MyStruct::my_method(&self, data: Vec<u8>)
+            println!("     - {}", m.name);
         }
     }
 }
